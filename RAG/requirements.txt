@@ -1,0 +1,12 @@
+newspaper4k
+lxml_html_clean
+sentence-transformers
+faiss-cpu
+feedparser
+nltk
+transformers
+accelerate
+requests
+beautifulsoup4
+indic-nlp-library
+langdetect
