@@ -1,11 +1,5 @@
 # ============================================================
-# store.py — FAISS vector index + SQLite metadata store.
-#
-# Responsibilities:
-#   • init_db()           — create table if missing
-#   • save_to_index()     — append new embeddings + metadata
-#   • load_seen_urls()    — return URLs already indexed
-#   • get_next_chunk_id() — for monotonic IDs across runs
+# store.py
 # ============================================================
 
 import os
@@ -13,36 +7,75 @@ import sqlite3
 import numpy as np
 import faiss
 
-from rag.config import INDEX_PATH, DB_PATH, INDEX_DIR
+from rag.config import (
+    INDEX_PATH, DB_PATH, INDEX_DIR,
+    FAISS_INDEX_TYPE, FAISS_NLIST, FAISS_NPROBE
+)
+
+EMBEDDING_DIM = 384   # all-MiniLM-L6-v2
 
 
-# ── Guard: ensure Drive is mounted before touching paths ─────
+# ── Guard ─────────────────────────────────────────────────────
 
 def _check_drive():
-    """
-    Fail fast with a clear message if Google Drive isn't mounted
-    but the config paths expect it to be.
-    """
+    # Only raise if path actually points at Drive — allows local runs
     if DB_PATH.startswith('/drive/') and not os.path.exists('/drive/MyDrive'):
         raise RuntimeError(
-            "\n❌ Google Drive is not mounted but paths point to Drive.\n"
-            "   Fix: run this cell first in your notebook:\n\n"
-            "       from google.colab import drive\n"
-            "       drive.mount('/drive')\n\n"
-            "   Then re-run your imports."
+            "\n❌ Google Drive is not mounted.\n"
+            "   Run:  from google.colab import drive; drive.mount('/drive')\n"
+            "   Then re-import."
         )
 
-_check_drive()   # runs once on import — fails fast with a clear message
+_check_drive()
 
 
-# ── DB init ──────────────────────────────────────────────────
+# ── FAISS index factory ───────────────────────────────────────
+
+def _make_index(dim: int) -> faiss.Index:
+    """
+    Create the right index type based on config.
+    IVFFlat needs training data — caller handles that.
+    """
+    if FAISS_INDEX_TYPE == 'IVFFlat':
+        quantizer = faiss.IndexFlatIP(dim)
+        index     = faiss.IndexIVFFlat(quantizer, dim, FAISS_NLIST,
+                                       faiss.METRIC_INNER_PRODUCT)
+        return index
+    # Default / fallback
+    return faiss.IndexFlatIP(dim)
+
+
+def _load_or_create_index(embeddings: np.ndarray) -> faiss.Index:
+    """
+    Load existing index if present; otherwise create and (for IVFFlat)
+    train a fresh one using the current batch as training data.
+    """
+    if os.path.exists(INDEX_PATH):
+        index = faiss.read_index(INDEX_PATH)
+        # Ensure nprobe is set for IVF indexes on every load
+        if hasattr(index, 'nprobe'):
+            index.nprobe = FAISS_NPROBE
+        return index
+
+    # First run — create
+    index = _make_index(embeddings.shape[1])
+    if FAISS_INDEX_TYPE == 'IVFFlat':
+        if len(embeddings) < FAISS_NLIST:
+            print(f"⚠️  Only {len(embeddings)} vectors but nlist={FAISS_NLIST}. "
+                  f"Falling back to IndexFlatIP for now.")
+            return faiss.IndexFlatIP(embeddings.shape[1])
+        print(f"🏋️  Training IVFFlat index on {len(embeddings)} vectors…")
+        index.train(embeddings)
+        index.nprobe = FAISS_NPROBE
+    return index
+
+
+# ── DB init ───────────────────────────────────────────────────
 
 def init_db(db_path: str = DB_PATH) -> None:
-    """Create the chunks table if it doesn't already exist."""
     os.makedirs(INDEX_DIR, exist_ok=True)
-    conn   = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute('''
+    conn = sqlite3.connect(db_path)
+    conn.execute('''
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_id    INTEGER PRIMARY KEY,
             text        TEXT,
@@ -54,6 +87,10 @@ def init_db(db_path: str = DB_PATH) -> None:
             token_count INTEGER
         )
     ''')
+    # Index on url makes load_seen_urls() fast at millions of rows
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_url ON chunks(url)
+    ''')
     conn.commit()
     conn.close()
     print(f"✅ DB ready: {db_path}")
@@ -62,15 +99,10 @@ def init_db(db_path: str = DB_PATH) -> None:
 # ── Helpers ───────────────────────────────────────────────────
 
 def load_seen_urls(db_path: str = DB_PATH) -> set:
-    """
-    Return every URL already stored in the DB.
-    Used by pipeline.py to skip re-scraping + re-indexing.
-    Returns empty set if DB doesn't exist yet (first run).
-    """
     try:
         conn   = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT url FROM chunks")
+        cursor.execute("SELECT DISTINCT url FROM chunks")
         seen = {row[0] for row in cursor.fetchall()}
         conn.close()
         return seen
@@ -79,11 +111,6 @@ def load_seen_urls(db_path: str = DB_PATH) -> set:
 
 
 def get_next_chunk_id(db_path: str = DB_PATH) -> int:
-    """
-    Return MAX(chunk_id) + 1 so new chunks continue
-    the sequence from where the last session left off.
-    Returns 0 on first run (empty table).
-    """
     try:
         conn   = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -101,37 +128,14 @@ def save_to_index(chunks:     list[dict],
                   embeddings: np.ndarray,
                   index_path: str = INDEX_PATH,
                   db_path:    str = DB_PATH) -> None:
-    """
-    Append *embeddings* to the FAISS index and write
-    *chunks* metadata to SQLite.
-
-    FAISS:
-      - First call  → creates IndexFlatIP (cosine via dot-product on
-                       L2-normalised vectors)
-      - Later calls → reads existing index and appends — never overwrites
-
-    SQLite:
-      - INSERT OR REPLACE ensures safe upserts if a chunk_id
-        somehow appears twice (shouldn't happen but defensive)
-
-    Caller must L2-normalise embeddings before calling this
-    (pipeline.py does this with faiss.normalize_L2).
-    """
     os.makedirs(INDEX_DIR, exist_ok=True)
 
-    # ── FAISS ────────────────────────────────────────────────
-    if os.path.exists(index_path):
-        index = faiss.read_index(index_path)   # load existing → append
-    else:
-        index = faiss.IndexFlatIP(embeddings.shape[1])  # first run → create
-
+    index = _load_or_create_index(embeddings)
     index.add(embeddings)
     faiss.write_index(index, index_path)
 
-    # ── SQLite ────────────────────────────────────────────────
-    conn   = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.executemany(
+    conn = sqlite3.connect(db_path)
+    conn.executemany(
         'INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?)',
         [
             (c['chunk_id'], c['text'], c['title'], c['url'],

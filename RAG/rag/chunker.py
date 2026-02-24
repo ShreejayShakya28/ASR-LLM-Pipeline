@@ -81,7 +81,7 @@ def chunk_text(text: str,
             overlap_count = 0
             for s in reversed(current):
                 st = _count_tokens(s)
-                if overlap_count + st < overlap:
+                if overlap_count + st <= overlap:
                     overlap_sents.insert(0, s)
                     overlap_count += st
                 else:
