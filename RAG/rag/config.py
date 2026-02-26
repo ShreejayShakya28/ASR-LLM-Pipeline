@@ -4,7 +4,7 @@
 # ============================================================
 
 # ── Paths ────────────────────────────────────────────────────
-INDEX_DIR  = '/drive/MyDrive/nepal_rag_index'
+INDEX_DIR  = '/drive/MyDrive/Test-1'
 INDEX_PATH = f'{INDEX_DIR}/news.faiss'
 DB_PATH    = f'{INDEX_DIR}/metadata.db'
 

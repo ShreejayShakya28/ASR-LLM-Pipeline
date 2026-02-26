@@ -7,7 +7,7 @@ import time
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
-from datetime import datetime, date
+from datetime import datetime
 from bs4 import BeautifulSoup
 from newspaper import Article
 
@@ -17,10 +17,10 @@ from rag.config import (
     BACKFILL_START_YEAR, BACKFILL_END_YEAR, SITEMAP_SOURCES
 )
 
+
 # ── Retry-aware GET ───────────────────────────────────────────
 
 def _get(url: str, retries: int = 3) -> requests.Response | None:
-    """HTTP GET with exponential back-off. Returns None on total failure."""
     for attempt in range(retries):
         try:
             resp = requests.get(url, headers=SCRAPE_HEADERS,
@@ -30,7 +30,7 @@ def _get(url: str, retries: int = 3) -> requests.Response | None:
             return resp
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)   # 1s, 2s, 4s
+                time.sleep(2 ** attempt)
             else:
                 print(f"      ⚠️  GET failed after {retries} tries: {e}")
     return None
@@ -80,14 +80,8 @@ def fetch_article_text(url: str) -> str | None:
 # ── Text cleaner ─────────────────────────────────────────────
 
 def clean_text(text: str) -> str:
-    """
-    Normalise whitespace, strip URLs/HTML.
-    Keeps Devanagari, standard punctuation including ।  (Devanagari danda).
-    """
     text = re.sub(r'http\S+|www\S+', '', text)
     text = re.sub(r'<[^>]+>', '', text)
-    # Added \u0964 (danda ।) and \u0965 (double danda ॥) — critical for
-    # Nepali sentence boundary detection downstream
     text = re.sub(
         r'[^\w\s\.\,\!\?\;\:\-\'\"\u0900-\u097F\u0964\u0965]', ' ', text
     )
@@ -120,14 +114,12 @@ def test_feeds(feed_list: list[str]) -> list[str]:
     return unique
 
 
-# ── Sitemap backfill ──────────────────────────────────────────
+# ── Sitemap parsing (URL collection only) ────────────────────
 
-def _parse_sitemap(url: str) -> list[str]:
+def _parse_sitemap(url: str, target_year: int | None = None) -> list[str]:
     """
-    Recursively parse a sitemap index or URL sitemap.
-    Returns a flat list of article URLs.
-    Handles both <sitemapindex> (index of sitemaps) and
-    <urlset> (actual article URLs).
+    Recursively parse sitemap. Returns flat list of article URLs.
+    If target_year is set, only follows child sitemaps containing that year.
     """
     resp = _get(url)
     if not resp:
@@ -141,23 +133,25 @@ def _parse_sitemap(url: str) -> list[str]:
     ns  = {'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     tag = root.tag.lower()
 
-    # Sitemap index — recurse into child sitemaps
     if 'sitemapindex' in tag:
         urls = []
         for sitemap in root.findall('sm:sitemap', ns):
             loc = sitemap.findtext('sm:loc', namespaces=ns)
-            if loc:
-                # Filter by year before fetching — avoids downloading
-                # sitemaps for years we don't want
+            if not loc:
+                continue
+            if target_year is not None:
+                if str(target_year) not in loc:
+                    continue
+            else:
                 year_ok = any(
                     str(y) in loc
                     for y in range(BACKFILL_START_YEAR, BACKFILL_END_YEAR + 1)
                 )
-                if year_ok:
-                    urls.extend(_parse_sitemap(loc))
+                if not year_ok:
+                    continue
+            urls.extend(_parse_sitemap(loc, target_year=target_year))
         return urls
 
-    # URL set — extract article locs
     if 'urlset' in tag:
         return [
             loc.text.strip()
@@ -168,31 +162,47 @@ def _parse_sitemap(url: str) -> list[str]:
     return []
 
 
-def scrape_sitemaps(sitemap_urls: list[str] = SITEMAP_SOURCES,
-                    skip_urls: set = None) -> list[dict]:
+def collect_sitemap_urls(sitemap_urls: list[str],
+                         target_year: int | None = None,
+                         skip_urls: set = None) -> list[str]:
     """
-    Traverse sitemap sources, collect article URLs for the backfill
-    date range, scrape each one, and return article dicts.
-
-    This is the slow path — only call it once for initial backfill,
-    not in daily_refresh().
+    Collect all article URLs from sitemaps without scraping.
+    Returns deduplicated list of new URLs not in skip_urls.
     """
     if skip_urls is None:
         skip_urls = set()
 
-    all_article_urls: list[str] = []
+    all_urls = []
+    seen_in_batch = set()
+
     for sm_url in sitemap_urls:
-        print(f"\n🗺️  Parsing sitemap: {sm_url}")
-        found = _parse_sitemap(sm_url)
-        new   = [u for u in found if u not in skip_urls]
-        print(f"   → {len(found)} URLs found, {len(new)} new")
-        all_article_urls.extend(new)
+        label = f"year={target_year}" if target_year else "all years"
+        print(f"\n🗺️  Parsing sitemap ({label}): {sm_url}")
+        found = _parse_sitemap(sm_url, target_year=target_year)
 
-    print(f"\n📋 Total URLs to scrape: {len(all_article_urls)}")
+        new = []
+        for u in found:
+            if u not in skip_urls and u not in seen_in_batch:
+                new.append(u)
+                seen_in_batch.add(u)
 
+        print(f"   → {len(found)} URLs found | {len(new)} new (not yet indexed)")
+        all_urls.extend(new)
+
+    return all_urls
+
+
+def scrape_url_batch(urls: list[str], batch_num: int = 1,
+                     total_batches: int = 1) -> list[dict]:
+    """
+    Scrape a list of URLs and return article dicts.
+    This is called per-batch so results are saved before moving to next batch.
+    """
     articles = []
-    for i, url in enumerate(all_article_urls, 1):
-        print(f"\n[{i}/{len(all_article_urls)}] {url[:80]}")
+    failed   = 0
+
+    for i, url in enumerate(urls, 1):
+        print(f"   [{i}/{len(urls)}] {url[:75]}")
         raw = fetch_article_text(url)
         time.sleep(REQUEST_DELAY)
 
@@ -200,18 +210,23 @@ def scrape_sitemaps(sitemap_urls: list[str] = SITEMAP_SOURCES,
             cleaned = clean_text(raw)
             if len(cleaned.split()) >= MIN_WORD_COUNT:
                 articles.append({
-                    'title' : url.split('/')[-1].replace('-', ' ').title(),
+                    'title' : url.split('/')[-1].replace('-', ' ').title()[:120],
                     'url'   : url,
-                    'date'  : datetime.now().strftime('%Y-%m-%d'),  # best-effort
+                    'date'  : datetime.now().strftime('%Y-%m-%d'),
                     'text'  : cleaned,
                     'source': 'sitemap_backfill',
                 })
+            else:
+                failed += 1
+        else:
+            failed += 1
 
-    print(f"\n✅ Backfill complete: {len(articles)} articles scraped")
+    print(f"\n   📊 Batch {batch_num}/{total_batches} — "
+          f"✅ {len(articles)} scraped | ❌ {failed} failed")
     return articles
 
 
-# ── Main RSS scraper (unchanged logic, uses _get now) ─────────
+# ── Main RSS scraper ──────────────────────────────────────────
 
 def scrape_feeds(feed_urls: list[str],
                  max_per_feed: int = MAX_PER_FEED,

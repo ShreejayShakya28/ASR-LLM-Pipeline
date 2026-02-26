@@ -12,13 +12,12 @@ from rag.config import (
     FAISS_INDEX_TYPE, FAISS_NLIST, FAISS_NPROBE
 )
 
-EMBEDDING_DIM = 384   # all-MiniLM-L6-v2
+EMBEDDING_DIM = 384
 
 
 # ── Guard ─────────────────────────────────────────────────────
 
 def _check_drive():
-    # Only raise if path actually points at Drive — allows local runs
     if DB_PATH.startswith('/drive/') and not os.path.exists('/drive/MyDrive'):
         raise RuntimeError(
             "\n❌ Google Drive is not mounted.\n"
@@ -32,32 +31,21 @@ _check_drive()
 # ── FAISS index factory ───────────────────────────────────────
 
 def _make_index(dim: int) -> faiss.Index:
-    """
-    Create the right index type based on config.
-    IVFFlat needs training data — caller handles that.
-    """
     if FAISS_INDEX_TYPE == 'IVFFlat':
         quantizer = faiss.IndexFlatIP(dim)
         index     = faiss.IndexIVFFlat(quantizer, dim, FAISS_NLIST,
                                        faiss.METRIC_INNER_PRODUCT)
         return index
-    # Default / fallback
     return faiss.IndexFlatIP(dim)
 
 
 def _load_or_create_index(embeddings: np.ndarray) -> faiss.Index:
-    """
-    Load existing index if present; otherwise create and (for IVFFlat)
-    train a fresh one using the current batch as training data.
-    """
     if os.path.exists(INDEX_PATH):
         index = faiss.read_index(INDEX_PATH)
-        # Ensure nprobe is set for IVF indexes on every load
         if hasattr(index, 'nprobe'):
             index.nprobe = FAISS_NPROBE
         return index
 
-    # First run — create
     index = _make_index(embeddings.shape[1])
     if FAISS_INDEX_TYPE == 'IVFFlat':
         if len(embeddings) < FAISS_NLIST:
@@ -87,10 +75,7 @@ def init_db(db_path: str = DB_PATH) -> None:
             token_count INTEGER
         )
     ''')
-    # Index on url makes load_seen_urls() fast at millions of rows
-    conn.execute('''
-        CREATE INDEX IF NOT EXISTS idx_url ON chunks(url)
-    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_url ON chunks(url)')
     conn.commit()
     conn.close()
     print(f"✅ DB ready: {db_path}")
@@ -122,6 +107,91 @@ def get_next_chunk_id(db_path: str = DB_PATH) -> int:
         return 0
 
 
+# ── Storage monitor ───────────────────────────────────────────
+
+def storage_report(db_path: str = DB_PATH,
+                   index_path: str = INDEX_PATH) -> dict:
+    """
+    Print and return a full snapshot of what is actually on disk.
+    Call this any time to verify state — especially after each batch.
+    """
+    report = {}
+
+    # SQLite stats
+    try:
+        conn   = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM chunks")
+        report['total_chunks'] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(DISTINCT url) FROM chunks")
+        report['total_articles'] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(DISTINCT source) FROM chunks")
+        report['total_sources'] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT MIN(date), MAX(date) FROM chunks")
+        row = cursor.fetchone()
+        report['date_range'] = f"{row[0]}  →  {row[1]}"
+
+        # Per-source breakdown
+        cursor.execute("""
+            SELECT source, COUNT(DISTINCT url) as articles
+            FROM chunks
+            GROUP BY source
+            ORDER BY articles DESC
+            LIMIT 15
+        """)
+        report['by_source'] = cursor.fetchall()
+
+        conn.close()
+
+        db_bytes = os.path.getsize(db_path)
+        report['db_size_mb'] = db_bytes / 1_048_576
+
+    except Exception as e:
+        report['db_error'] = str(e)
+
+    # FAISS stats
+    try:
+        if os.path.exists(index_path):
+            index = faiss.read_index(index_path)
+            report['faiss_vectors'] = index.ntotal
+            faiss_bytes = os.path.getsize(index_path)
+            report['faiss_size_mb'] = faiss_bytes / 1_048_576
+        else:
+            report['faiss_vectors'] = 0
+            report['faiss_size_mb'] = 0.0
+    except Exception as e:
+        report['faiss_error'] = str(e)
+
+    # Total Drive usage
+    total_mb = report.get('db_size_mb', 0) + report.get('faiss_size_mb', 0)
+    report['total_drive_mb'] = total_mb
+
+    # Print summary
+    print("\n" + "=" * 55)
+    print("📊  STORAGE REPORT")
+    print("=" * 55)
+    print(f"  Articles indexed  : {report.get('total_articles', 0):,}")
+    print(f"  Total chunks      : {report.get('total_chunks', 0):,}")
+    print(f"  FAISS vectors     : {report.get('faiss_vectors', 0):,}")
+    print(f"  Date range        : {report.get('date_range', 'n/a')}")
+    print(f"  SQLite size       : {report.get('db_size_mb', 0):.2f} MB")
+    print(f"  FAISS size        : {report.get('faiss_size_mb', 0):.2f} MB")
+    print(f"  Total on Drive    : {total_mb:.2f} MB")
+    print("-" * 55)
+    if 'by_source' in report:
+        print("  Top sources:")
+        for src, count in report['by_source']:
+            short = src[-55:] if len(src) > 55 else src
+            print(f"    {count:>6,} articles  {short}")
+    print("=" * 55 + "\n")
+
+    return report
+
+
 # ── Persistence ───────────────────────────────────────────────
 
 def save_to_index(chunks:     list[dict],
@@ -130,13 +200,15 @@ def save_to_index(chunks:     list[dict],
                   db_path:    str = DB_PATH) -> None:
     os.makedirs(INDEX_DIR, exist_ok=True)
 
+    # ── FAISS ─────────────────────────────────────────────────
     index = _load_or_create_index(embeddings)
     index.add(embeddings)
     faiss.write_index(index, index_path)
 
+    # ── SQLite ────────────────────────────────────────────────
     conn = sqlite3.connect(db_path)
     conn.executemany(
-        'INSERT OR REPLACE INTO chunks VALUES (?,?,?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO chunks VALUES (?,?,?,?,?,?,?,?)',
         [
             (c['chunk_id'], c['text'], c['title'], c['url'],
              c['date'], c['source'], c['chunk_index'], c['token_count'])
@@ -144,7 +216,18 @@ def save_to_index(chunks:     list[dict],
         ]
     )
     conn.commit()
+
+    # Verify the insert actually landed
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM chunks")
+    total_in_db = cursor.fetchone()[0]
     conn.close()
 
-    print(f"✅ FAISS: {index.ntotal} total vectors | "
-          f"SQLite: +{len(chunks)} chunks added")
+    db_mb    = os.path.getsize(db_path) / 1_048_576
+    faiss_mb = os.path.getsize(index_path) / 1_048_576
+
+    print(f"  💾 Saved  → chunks in DB: {total_in_db:,} | "
+          f"FAISS vectors: {index.ntotal:,}")
+    print(f"  📁 Sizes  → SQLite: {db_mb:.2f} MB | "
+          f"FAISS: {faiss_mb:.2f} MB | "
+          f"Total: {db_mb + faiss_mb:.2f} MB")
