@@ -5,13 +5,13 @@
 import faiss
 from datetime import datetime
 from rag.config  import (MAX_PER_FEED, ALL_CANDIDATE_FEEDS,
-                         SITEMAP_SOURCES, BACKFILL_START_YEAR,
-                         BACKFILL_END_YEAR)
+    SITEMAP_SOURCES, BACKFILL_START_YEAR,
+    BACKFILL_END_YEAR)
 from rag.scraper import (scrape_feeds, test_feeds,
-                         collect_sitemap_urls, scrape_url_batch)
+    collect_sitemap_urls, scrape_url_batch)
 from rag.chunker import chunk_articles
 from rag.store   import (init_db, save_to_index, load_seen_urls,
-                         get_next_chunk_id, storage_report)
+    get_next_chunk_id, storage_report)
 from rag.models  import embedding_model
 
 
@@ -75,7 +75,7 @@ def daily_refresh(feed_urls:    list[str] | None = None,
 
     saved = _embed_and_save(new_articles, label="Daily refresh")
     print(f"\n🎉 Daily refresh done! "
-          f"+{len(new_articles)} articles | +{saved} chunks")
+        f"+{len(new_articles)} articles | +{saved} chunks")
     storage_report()
 
 
@@ -83,6 +83,7 @@ def daily_refresh(feed_urls:    list[str] | None = None,
 
 def backfill(sitemap_urls:  list[str] | None = None,
              articles_per_batch: int          = 3000,
+             batch_size:    int | None        = None,
              start_year:    int | None        = None,
              end_year:      int | None        = None) -> None:
     """
@@ -103,6 +104,8 @@ def backfill(sitemap_urls:  list[str] | None = None,
         start_year:         Override BACKFILL_START_YEAR
         end_year:           Override BACKFILL_END_YEAR
     """
+    if batch_size is not None:
+        articles_per_batch = batch_size
     print("=" * 60)
     print(f"📚 Backfill — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 60)
@@ -149,13 +152,13 @@ def backfill(sitemap_urls:  list[str] | None = None,
 
         # Step 2 — split into batches and process
         batches      = [year_urls[i:i + articles_per_batch]
-                        for i in range(0, len(year_urls), articles_per_batch)]
+            for i in range(0, len(year_urls), articles_per_batch)]
         year_articles = 0
         year_chunks   = 0
 
         for batch_num, batch_urls in enumerate(batches, 1):
             print(f"\n  ┌─ Batch {batch_num}/{len(batches)} "
-                  f"({len(batch_urls):,} URLs) ─────────────────")
+                f"({len(batch_urls):,} URLs) ─────────────────")
 
             # Reload seen_urls before each batch — catches mid-year saves
             seen_urls = load_seen_urls()
@@ -188,13 +191,13 @@ def backfill(sitemap_urls:  list[str] | None = None,
             year_chunks   += saved_chunks
 
             print(f"  └─ ✅ Batch {batch_num} complete: "
-                  f"+{len(articles):,} articles | +{saved_chunks:,} chunks")
+                f"+{len(articles):,} articles | +{saved_chunks:,} chunks")
 
             # Storage report after every batch so you can see growth
             storage_report()
 
         print(f"\n  🏁 Year {year} complete: "
-              f"+{year_articles:,} articles | +{year_chunks:,} chunks")
+            f"+{year_articles:,} articles | +{year_chunks:,} chunks")
 
         grand_total_articles += year_articles
         grand_total_chunks   += year_chunks

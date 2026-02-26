@@ -104,6 +104,11 @@ SITEMAP_SOURCES = [
 # At 5-year scale you will have ~2-5M chunks.
 # Switch from IndexFlatIP to IndexIVFFlat for tolerable query speed.
 # nlist = number of Voronoi cells; 4096 is a good default at this scale.
-FAISS_INDEX_TYPE = 'IVFFlat'   # 'Flat' for <500k chunks, 'IVFFlat' beyond
-FAISS_NLIST      = 4096        # only used when FAISS_INDEX_TYPE == 'IVFFlat'
-FAISS_NPROBE     = 64          # cells to search at query time (speed vs recall tradeoff)
+# FAISS_INDEX_TYPE = 'IVFFlat'   # 'Flat' for <500k chunks, 'IVFFlat' beyond
+# FAISS_NLIST      = 4096        # only used when FAISS_INDEX_TYPE == 'IVFFlat'
+# FAISS_NPROBE     = 64          # cells to search at query time (speed vs recall tradeoff)
+
+# config.py — for now while building the knowledge base
+FAISS_INDEX_TYPE = 'Flat'      # safe for up to ~500k chunks
+FAISS_NLIST      = 4096        # keep for later
+FAISS_NPROBE     = 64          # keep for later
