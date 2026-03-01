@@ -4,7 +4,7 @@
 # ============================================================
 
 # ── Paths ────────────────────────────────────────────────────
-INDEX_DIR  = '/drive/MyDrive/Test-1'
+INDEX_DIR  = '/drive/MyDrive/Test-Two-Years'
 INDEX_PATH = f'{INDEX_DIR}/news.faiss'
 DB_PATH    = f'{INDEX_DIR}/metadata.db'
 
@@ -32,7 +32,7 @@ CHUNK_OVERLAP = 50
 
 # ── Retrieval ────────────────────────────────────────────────
 DEFAULT_TOP_K       = 5         # slightly wider retrieval at larger KB scale
-DEFAULT_DAYS_FILTER = 1825      # 5 years (5 × 365) — no effective cutoff
+DEFAULT_DAYS_FILTER = 730     # 5 years (5 × 365) — no effective cutoff
 MIN_COSINE          = 0.45
 SEM_WEIGHT          = 0.7
 FRESH_WEIGHT        = 0.3
@@ -46,7 +46,7 @@ CONTEXT_CHARS   = 1200
 # ── Backfill date range ───────────────────────────────────────
 import datetime
 BACKFILL_END_YEAR   = datetime.date.today().year
-BACKFILL_START_YEAR = BACKFILL_END_YEAR - 5   # go back 5 years
+BACKFILL_START_YEAR = BACKFILL_END_YEAR - 2   # go back 5 years
 
 # ── RSS Feeds (live / recent ~30 days) ───────────────────────
 ALL_CANDIDATE_FEEDS = [
