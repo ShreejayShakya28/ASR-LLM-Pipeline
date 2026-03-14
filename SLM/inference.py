@@ -41,7 +41,7 @@ def run_inference(model, config, instruction, input_text="", device="cuda", max_
 
 def main():
     # Configuration
-    MODEL_PATH = "/content/drive/MyDrive/gpt2-medium355M-sft.pth"
+    MODEL_PATH = "/content/drive/MyDrive/RAG/SLM_Model"
     MODEL_NAME = "gpt2-medium (355M)"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     

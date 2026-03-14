@@ -4,14 +4,14 @@
 # ============================================================
 
 # ── Paths ────────────────────────────────────────────────────
-INDEX_DIR  = '/drive/MyDrive/Test-Two-Years'
-INDEX_PATH = f'{INDEX_DIR}/news.faiss'
-DB_PATH    = f'{INDEX_DIR}/metadata.db'
+INDEX_DIR  = '/drive/MyDrive/RAG'
+INDEX_PATH = f'{INDEX_DIR}/Knowledge_Base/news.faiss'
+DB_PATH    = f'{INDEX_DIR}/Knowledge_Base/metadata.db'
 
 # ── Models ───────────────────────────────────────────────────
 EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
 RERANKER_MODEL  = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
-LLM_MODEL       = 'google/flan-t5-large'
+# LLM_MODEL       = 'google/flan-t5-large'
 
 # ── Scraping ─────────────────────────────────────────────────
 MAX_PER_FEED     = 100          # higher ceiling for backfill runs
