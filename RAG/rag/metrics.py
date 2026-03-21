@@ -251,9 +251,9 @@ def _run_flan_rag(question: str, top_k: int, days_filter: int,
 
 def _run_flan_norag(question: str) -> dict:
     """Flan-T5 without retrieval — raw model knowledge only."""
-import rag.models as _m
-tokenizer = _m.tokenizer
-llm       = _m.llm
+    import rag.models as _m
+    tokenizer = _m.tokenizer
+    llm       = _m.llm
     from rag.config import MAX_NEW_TOKENS
 
     # embed stage still happens conceptually (we just skip search)
